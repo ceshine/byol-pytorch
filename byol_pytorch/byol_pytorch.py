@@ -74,7 +74,8 @@ class MLP(nn.Module):
         super().__init__()
         self.net = nn.Sequential(
             nn.Linear(dim, hidden_size),
-            nn.BatchNorm1d(hidden_size),
+            # nn.BatchNorm1d(hidden_size),
+            nn.LayerNorm(hidden_size),
             nn.ReLU(inplace=True),
             nn.Linear(hidden_size, projection_size)
         )
@@ -83,69 +84,44 @@ class MLP(nn.Module):
         return self.net(x)
 
 # a wrapper class for the base neural network
-# will manage the interception of the hidden layer output
-# and pipe it into the projecter and predictor nets
-
-class NetWrapper(nn.Module):
-    def __init__(self, net, projection_size, projection_hidden_size, layer = -2):
+class ProjectionWrapper(nn.Module):
+    def __init__(self, net, net_final_size: int,projection_size, projection_hidden_size, layer = -2):
         super().__init__()
         self.net = net
         self.layer = layer
-
-        self.projector = None
-        self.projection_size = projection_size
-        self.projection_hidden_size = projection_hidden_size
-
-        self.hidden = None
-        self.hook_registered = False
-
-    def _find_layer(self):
-        if type(self.layer) == str:
-            modules = dict([*self.net.named_modules()])
-            return modules.get(self.layer, None)
-        elif type(self.layer) == int:
-            children = [*self.net.children()]
-            return children[self.layer]
-        return None
-
-    def _hook(self, _, __, output):
-        self.hidden = flatten(output)
-
-    def _register_hook(self):
-        layer = self._find_layer()
-        assert layer is not None, f'hidden layer ({self.layer}) not found'
-        handle = layer.register_forward_hook(self._hook)
-        self.hook_registered = True
-
-    @singleton('projector')
-    def _get_projector(self, hidden):
-        _, dim = hidden.shape
-        projector = MLP(dim, self.projection_size, self.projection_hidden_size)
-        return projector.to(hidden)
-
-    def get_representation(self, x):
-        if not self.hook_registered:
-            self._register_hook()
-
-        if self.layer == -1:
-            return self.net(x)
-
-        _ = self.net(x)
-        hidden = self.hidden
-        self.hidden = None
-        assert hidden is not None, f'hidden layer {self.layer} never emitted an output'
-        return hidden
+        self.projector = MLP(net_final_size, projection_size,projection_hidden_size)
 
     def forward(self, x):
-        representation = self.get_representation(x)
-        projector = self._get_projector(representation)
-        projection = projector(representation)
+        representation = self.net(x)
+        projection = self.projector(representation)
         return projection
 
-# main class
+def set_trainable_attr(m, b):
+    m.trainable = b
+    for p in m.parameters():
+        p.requires_grad = b
 
+
+def children(m):
+    return m if isinstance(m, (list, tuple)) else list(m.children())
+
+
+def apply_leaf(m, f):
+    c = children(m)
+    if isinstance(m, nn.Module):
+        f(m)
+    if len(c) > 0:
+        for l in c:
+            apply_leaf(l, f)
+
+
+def set_trainable(l, b):
+    apply_leaf(l, lambda m: set_trainable_attr(m, b))
+
+
+# main class
 class BYOL(nn.Module):
-    def __init__(self, net, image_size, hidden_layer = -2, projection_size = 256, projection_hidden_size = 4096, augment_fn = None, moving_average_decay = 0.99):
+    def __init__(self, net, image_size, net_final_size: int, hidden_layer = -2, projection_size = 256, projection_hidden_size = 4096, augment_fn = None, moving_average_decay = 0.99):
         super().__init__()
 
         # default SimCLR augmentation
@@ -161,7 +137,9 @@ class BYOL(nn.Module):
 
         self.augment = default(augment_fn, DEFAULT_AUG)
 
-        self.online_encoder = NetWrapper(net, projection_size, projection_hidden_size, layer=hidden_layer)
+        self.online_encoder = ProjectionWrapper(
+            net, net_final_size, projection_size, projection_hidden_size, layer=hidden_layer
+        )
         self.target_encoder = None
         self.target_ema_updater = EMA(moving_average_decay)
 
@@ -173,6 +151,7 @@ class BYOL(nn.Module):
     @singleton('target_encoder')
     def _get_target_encoder(self):
         target_encoder = copy.deepcopy(self.online_encoder)
+        set_trainable(target_encoder, False)
         return target_encoder
 
     def reset_moving_average(self):
