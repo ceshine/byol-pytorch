@@ -1,3 +1,4 @@
+import os
 import argparse
 import multiprocessing
 from pathlib import Path
@@ -30,7 +31,7 @@ EPOCHS     = 1000
 LR         = 3e-4
 NUM_GPUS   = 2
 IMAGE_SIZE = 256
-IMAGE_EXTS = ['jpg', 'png']
+IMAGE_EXTS = ['.jpg', '.png', '.jpeg']
 NUM_WORKERS = multiprocessing.cpu_count()
 
 # pytorch lightning module
@@ -51,20 +52,32 @@ class SelfSupervisedLearner(pl.LightningModule):
         return torch.optim.Adam(self.parameters(), lr=LR)
 
     def on_before_zero_grad(self, _):
-        self.learner.update_moving_average()
+        if self.learner.use_momentum:
+            self.learner.update_moving_average()
 
-# image dataset class
+# images dataset
+
+def expand_greyscale(t):
+    return t.expand(3, -1, -1)
 
 class ImagesDataset(Dataset):
     def __init__(self, folder, image_size):
         super().__init__()
         self.folder = folder
-        self.paths = [p for ext in IMAGE_EXTS for p in Path(f'{folder}').glob(f'**/*.{ext}')]
+        self.paths = []
+
+        for path in Path(f'{folder}').glob('**/*'):
+            _, ext = os.path.splitext(path)
+            if ext.lower() in IMAGE_EXTS:
+                self.paths.append(path)
+
+        print(f'{len(self.paths)} images found')
 
         self.transform = transforms.Compose([
             transforms.Resize(image_size),
             transforms.CenterCrop(image_size),
-            transforms.ToTensor()
+            transforms.ToTensor(),
+            transforms.Lambda(expand_greyscale)
         ])
 
     def __len__(self):
@@ -73,13 +86,14 @@ class ImagesDataset(Dataset):
     def __getitem__(self, index):
         path = self.paths[index]
         img = Image.open(path)
+        img = img.convert('RGB')
         return self.transform(img)
 
 # main
 
 if __name__ == '__main__':
     ds = ImagesDataset(args.image_folder, IMAGE_SIZE)
-    train_loader = DataLoader(ds, batch_size=BATCH_SIZE, num_workers=NUM_WORKERS)
+    train_loader = DataLoader(ds, batch_size=BATCH_SIZE, num_workers=NUM_WORKERS, shuffle=True)
 
     model = SelfSupervisedLearner(
         resnet,
@@ -90,5 +104,10 @@ if __name__ == '__main__':
         moving_average_decay = 0.99
     )
 
-    trainer = pl.Trainer(gpus=NUM_GPUS, max_epochs=EPOCHS)
+    trainer = pl.Trainer(
+        gpus = NUM_GPUS,
+        max_epochs = EPOCHS,
+        accumulate_grad_batches = 1
+    )
+
     trainer.fit(model, train_loader)

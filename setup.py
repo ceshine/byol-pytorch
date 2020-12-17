@@ -3,7 +3,7 @@ from setuptools import setup, find_packages
 setup(
   name = 'byol-pytorch',
   packages = find_packages(exclude=['examples']),
-  version = '0.1.4',
+  version = '0.5.1',
   license='MIT',
   description = 'Self-supervised contrastive learning made simple',
   author = 'Phil Wang',
@@ -11,8 +11,8 @@ setup(
   url = 'https://github.com/lucidrains/byol-pytorch',
   keywords = ['self-supervised learning', 'artificial intelligence'],
   install_requires=[
-      'torch',
-      'kornia'
+      'torch>=1.6',
+      'torchvision>=0.8'
   ],
   classifiers=[
       'Development Status :: 4 - Beta',
