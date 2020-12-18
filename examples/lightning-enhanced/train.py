@@ -128,10 +128,12 @@ class SelfSupervisedLearner(pl.LightningModule):
 def main(
         arch: str, image_folder: str, from_scratch: bool = False,
         batch_size: Optional[int] = None,
+        from_model: Optional[str] = None,
+        grad_accu: int = 1,
         num_gpus: int = 1, epochs: int = 100, lr: float = 4e-4):
     if arch.startswith("BiT"):
         base_model = BIT_MODELS[arch](head_size=-1)
-        if not from_scratch:
+        if not from_scratch and not from_model:
             base_model.load_from(np.load(f"cache/pretrained/{arch}.npz"))
         net_final_size = base_model.width_factor * 2048
     else:
@@ -164,19 +166,29 @@ def main(
         num_gpus=num_gpus,
         batch_size=batch_size if batch_size else 4,
         image_size=IMAGE_SIZE,
-        hidden_layer=-1,
         projection_size=256,
         projection_hidden_size=4096,
         net_final_size=net_final_size,
         moving_average_decay=0.99
     )
 
+    if from_model:
+        # Load pretrained-weights
+        weights = torch.load(from_model)
+        model.learner.online_encoder.projector.load_state_dict(
+            weights["online_encoder_proj"])
+        model.learner.online_encoder.net.load_state_dict(
+            weights["online_encoder_net"])
+        model.learner.online_predictor.load_state_dict(
+            weights["online_predictor"])
+        del weights
+
     trainer = pl.Trainer(
         accelerator='ddp' if num_gpus > 1 else None,
         # amp_backend="apex", amp_level='O2',
         precision=16,
         gpus=num_gpus,
-        val_check_interval=0.25,
+        val_check_interval=20,  # 0.25,
         gradient_clip_val=10,
         max_epochs=epochs,
         callbacks=[
@@ -186,7 +198,7 @@ def main(
                 filename='byol-{step:06d}-{val_loss:.4f}',
                 save_top_k=2)
         ],
-        accumulate_grad_batches=1,
+        accumulate_grad_batches=grad_accu,
         auto_scale_batch_size='power' if batch_size is None else None
     )
 
