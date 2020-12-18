@@ -2,6 +2,7 @@ import os
 import math
 from pathlib import Path
 from typing import Optional
+from itertools import chain
 
 import typer
 import numpy as np
@@ -14,6 +15,7 @@ from pytorch_lightning.callbacks import LearningRateMonitor, ModelCheckpoint
 from byol_pytorch import BYOL, RandomApply
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from pytorch_helper_bot import LinearLR, MultiStageScheduler
+from pytorch_helper_bot.optimizers import RAdam
 
 from bit_models import KNOWN_MODELS as BIT_MODELS
 from dataset import get_datasets, IMAGE_SIZE
@@ -33,8 +35,9 @@ NUM_WORKERS = 4
 
 class SelfSupervisedLearner(pl.LightningModule):
     def __init__(
-            self, net, train_dataset: Dataset, valid_dataset: Dataset, epochs: int, learning_rate: float,
-            batch_size: int = 32, **kwargs):
+            self, net, train_dataset: Dataset, valid_dataset: Dataset,
+            epochs: int, learning_rate: float,
+            batch_size: int = 32, num_gpus: int = 1, **kwargs):
         super().__init__()
         self.batch_size = batch_size
         self.train_dataset = train_dataset
@@ -42,6 +45,7 @@ class SelfSupervisedLearner(pl.LightningModule):
         self.learning_rate = learning_rate
         self.epochs = epochs
         self.learner = BYOL(net, **kwargs)
+        self.num_gpus = num_gpus
 
     def forward(self, images):
         return self.learner(images)
@@ -68,22 +72,40 @@ class SelfSupervisedLearner(pl.LightningModule):
 
     def validation_step(self, batch, batch_idx):
         loss = self.forward(batch)
-        # 2. log `val_loss`
-        self.log('val_loss', loss)
+        self.log('val_loss', loss, sync_dist=True)
 
     def training_step(self, images, _):
         loss = self.forward(images)
         return {'loss': loss}
 
     def configure_optimizers(self):
-        n_steps = math.floor(len(self.train_dataset) /
-                             self.batch_size) * self.epochs
+        layer_groups = [
+            [self.learner.online_encoder.net],
+            [
+                self.learner.online_encoder.projector,
+                self.learner.online_predictor
+            ]
+        ]
+        steps_per_epochs = math.floor(
+            len(self.train_dataset) / self.batch_size / self.num_gpus
+        )
+        print("Steps per epochs:", steps_per_epochs)
+        n_steps = steps_per_epochs * self.epochs
         lr_durations = [
             int(n_steps*0.05),
             int(np.ceil(n_steps*0.95)) + 1
         ]
         break_points = [0] + list(np.cumsum(lr_durations))[:-1]
-        optimizer = torch.optim.Adam(self.parameters(), lr=self.learning_rate)
+        optimizer = RAdam([
+            {
+                "params": chain(*[x.parameters() for x in layer_groups[0]]),
+                "lr": self.learning_rate * 0.33
+            },
+            {
+                "params": chain(*[x.parameters() for x in layer_groups[1]]),
+                "lr": self.learning_rate
+            }
+        ])
         scheduler = {
             'scheduler': MultiStageScheduler(
                 [
@@ -139,9 +161,10 @@ def main(
                 std=torch.tensor([0.229, 0.224, 0.225])
             )
         ),
+        num_gpus=num_gpus,
         batch_size=batch_size if batch_size else 4,
         image_size=IMAGE_SIZE,
-        hidden_layer='avgpool',
+        hidden_layer=-1,
         projection_size=256,
         projection_hidden_size=4096,
         net_final_size=net_final_size,
@@ -154,12 +177,13 @@ def main(
         precision=16,
         gpus=num_gpus,
         val_check_interval=0.25,
+        gradient_clip_val=10,
         max_epochs=epochs,
         callbacks=[
             LearningRateMonitor(logging_interval='step'),
             ModelCheckpoint(
                 monitor='val_loss',
-                filename='byol-{step:06d}-{val_loss:.2f}',
+                filename='byol-{step:06d}-{val_loss:.4f}',
                 save_top_k=2)
         ],
         accumulate_grad_batches=1,
@@ -170,6 +194,15 @@ def main(
         trainer.tune(model)
 
     trainer.fit(model)
+
+    torch.save({
+        "online_encoder_proj": model.learner.online_encoder.projector.state_dict(),
+        "online_encoder_net": model.learner.online_encoder.net.state_dict(),
+        "online_predictor": model.learner.online_predictor.state_dict(),
+        "config": {
+            "arch": arch
+        }
+    }, f"cache/byol_{arch}.pth")
 
 
 if __name__ == '__main__':
