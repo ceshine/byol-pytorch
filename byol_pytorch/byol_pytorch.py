@@ -94,10 +94,9 @@ class MLP(nn.Module):
 class ProjectionWrapper(nn.Module):
     "a wrapper class for the base neural network"
 
-    def __init__(self, net, net_final_size: int, projection_size, projection_hidden_size, layer=-2):
+    def __init__(self, net, net_final_size: int, projection_size, projection_hidden_size):
         super().__init__()
         self.net = net
-        self.layer = layer
         self.projector = MLP(
             net_final_size, projection_size, projection_hidden_size)
 
@@ -139,7 +138,6 @@ class BYOL(nn.Module):
         net,
         image_size,
         net_final_size: int,
-        hidden_layer=-2,
         projection_size=256,
         projection_hidden_size=4096,
         augment_fn=None,
@@ -166,7 +164,7 @@ class BYOL(nn.Module):
         self.augment2 = default(augment_fn2, self.augment1)
 
         self.online_encoder = ProjectionWrapper(
-            net, net_final_size, projection_size, projection_hidden_size, layer=hidden_layer
+            net, net_final_size, projection_size, projection_hidden_size
         )
         self.use_momentum = use_momentum
         self.target_encoder = None
