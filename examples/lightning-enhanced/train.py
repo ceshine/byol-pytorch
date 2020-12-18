@@ -1,6 +1,7 @@
 import os
 import math
 from pathlib import Path
+from typing import Optional
 
 import typer
 import numpy as np
@@ -75,7 +76,8 @@ class SelfSupervisedLearner(pl.LightningModule):
         return {'loss': loss}
 
     def configure_optimizers(self):
-        n_steps = math.floor(len(self.train_dataset) / self.batch_size) * self.epochs
+        n_steps = math.floor(len(self.train_dataset) /
+                             self.batch_size) * self.epochs
         lr_durations = [
             int(n_steps*0.05),
             int(np.ceil(n_steps*0.95)) + 1
@@ -101,7 +103,10 @@ class SelfSupervisedLearner(pl.LightningModule):
             self.learner.update_moving_average()
 
 
-def main(arch: str, image_folder: str, from_scratch: bool = False, num_gpus: int = 1, epochs: int = 100, lr: float = 4e-4):
+def main(
+        arch: str, image_folder: str, from_scratch: bool = False,
+        batch_size: Optional[int] = None,
+        num_gpus: int = 1, epochs: int = 100, lr: float = 4e-4):
     if arch.startswith("BiT"):
         base_model = BIT_MODELS[arch](head_size=-1)
         if not from_scratch:
@@ -134,7 +139,7 @@ def main(arch: str, image_folder: str, from_scratch: bool = False, num_gpus: int
                 std=torch.tensor([0.229, 0.224, 0.225])
             )
         ),
-        batch_size=4,
+        batch_size=batch_size if batch_size else 4,
         image_size=IMAGE_SIZE,
         hidden_layer='avgpool',
         projection_size=256,
@@ -144,9 +149,11 @@ def main(arch: str, image_folder: str, from_scratch: bool = False, num_gpus: int
     )
 
     trainer = pl.Trainer(
-        amp_level='O2', precision=16,
+        accelerator='ddp' if num_gpus > 1 else None,
+        # amp_backend="apex", amp_level='O2',
+        precision=16,
         gpus=num_gpus,
-        val_check_interval=1000,
+        val_check_interval=0.25,
         max_epochs=epochs,
         callbacks=[
             LearningRateMonitor(logging_interval='step'),
@@ -155,11 +162,12 @@ def main(arch: str, image_folder: str, from_scratch: bool = False, num_gpus: int
                 filename='byol-{step:06d}-{val_loss:.2f}',
                 save_top_k=2)
         ],
-        accumulate_grad_batches=2,
-        auto_scale_batch_size='power'
+        accumulate_grad_batches=1,
+        auto_scale_batch_size='power' if batch_size is None else None
     )
 
-    trainer.tune(model)
+    if batch_size is None:
+        trainer.tune(model)
 
     trainer.fit(model)
 
