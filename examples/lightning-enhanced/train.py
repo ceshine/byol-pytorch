@@ -1,4 +1,5 @@
 import os
+import math
 from pathlib import Path
 
 import typer
@@ -8,9 +9,13 @@ from torch.utils.data import DataLoader, Dataset
 from torchvision import transforms as T
 from PIL import Image
 import pytorch_lightning as pl
+from pytorch_lightning.callbacks import LearningRateMonitor, ModelCheckpoint
 from byol_pytorch import BYOL, RandomApply
+from torch.optim.lr_scheduler import CosineAnnealingLR
+from pytorch_helper_bot import LinearLR, MultiStageScheduler
 
 from bit_models import KNOWN_MODELS as BIT_MODELS
+from dataset import get_datasets, IMAGE_SIZE
 
 
 def load_and_pad_image(filepath: Path) -> Image.Image:
@@ -21,23 +26,20 @@ def load_and_pad_image(filepath: Path) -> Image.Image:
     new_image.paste(image, ((0, 43)))
     return new_image
 
-# constants
 
-
-LR = 3e-4
-NUM_GPUS = 2
-IMAGE_SIZE = 128
-IMAGE_EXTS = ['.jpg', '.png', '.jpeg']
 NUM_WORKERS = 4
-
-# pytorch lightning module
 
 
 class SelfSupervisedLearner(pl.LightningModule):
-    def __init__(self, net, dataset: Dataset, batch_size: int = 32, **kwargs):
+    def __init__(
+            self, net, train_dataset: Dataset, valid_dataset: Dataset, epochs: int, learning_rate: float,
+            batch_size: int = 32, **kwargs):
         super().__init__()
         self.batch_size = batch_size
-        self.dataset = dataset
+        self.train_dataset = train_dataset
+        self.valid_dataset = valid_dataset
+        self.learning_rate = learning_rate
+        self.epochs = epochs
         self.learner = BYOL(net, **kwargs)
 
     def forward(self, images):
@@ -45,50 +47,61 @@ class SelfSupervisedLearner(pl.LightningModule):
 
     def train_dataloader(self):
         return DataLoader(
-            self.dataset, batch_size=self.batch_size,
-            num_workers=NUM_WORKERS, shuffle=True, pin_memory=True
+            self.train_dataset, batch_size=self.batch_size,
+            num_workers=NUM_WORKERS, shuffle=True, pin_memory=True,
+            drop_last=True
         )
+
+    def get_progress_bar_dict(self):
+        # don't show the experiment version number
+        items = super().get_progress_bar_dict()
+        items.pop("v_num", None)
+        return items
+
+    def val_dataloader(self):
+        return DataLoader(
+            self.valid_dataset, batch_size=self.batch_size,
+            num_workers=NUM_WORKERS, shuffle=False, pin_memory=True,
+            drop_last=False
+        )
+
+    def validation_step(self, batch, batch_idx):
+        loss = self.forward(batch)
+        # 2. log `val_loss`
+        self.log('val_loss', loss)
 
     def training_step(self, images, _):
         loss = self.forward(images)
         return {'loss': loss}
 
     def configure_optimizers(self):
-        return torch.optim.Adam(self.parameters(), lr=LR)
+        n_steps = math.floor(len(self.train_dataset) / self.batch_size) * self.epochs
+        lr_durations = [
+            int(n_steps*0.05),
+            int(np.ceil(n_steps*0.95)) + 1
+        ]
+        break_points = [0] + list(np.cumsum(lr_durations))[:-1]
+        optimizer = torch.optim.Adam(self.parameters(), lr=self.learning_rate)
+        scheduler = {
+            'scheduler': MultiStageScheduler(
+                [
+                    LinearLR(optimizer, 0.01, lr_durations[0]),
+                    CosineAnnealingLR(optimizer, lr_durations[1])
+                ],
+                start_at_epochs=break_points
+            ),
+            'interval': 'step',
+            'frequency': 1,
+            'strict': True,
+        }
+        return [optimizer], [scheduler]
 
     def on_before_zero_grad(self, _):
         if self.learner.use_momentum:
             self.learner.update_moving_average()
 
-# images dataset
 
-
-class ImagesDataset(Dataset):
-    def __init__(self, folder, image_size):
-        super().__init__()
-        self.image_size = image_size
-        self.folder = folder
-        self.paths = []
-
-        for path in Path(f'{folder}').glob('**/*'):
-            _, ext = os.path.splitext(path)
-            if ext.lower() in IMAGE_EXTS:
-                self.paths.append(path)
-
-        print(f'{len(self.paths)} images found')
-
-    def __len__(self):
-        return len(self.paths)
-
-    def __getitem__(self, index):
-        path = self.paths[index]
-        img = load_and_pad_image(path)
-        return T.ToTensor()(img)
-
-# main
-
-
-def main(arch: str, image_folder: str, from_scratch: bool = False, num_gpus: int = 1, epochs: int = 100):
+def main(arch: str, image_folder: str, from_scratch: bool = False, num_gpus: int = 1, epochs: int = 100, lr: float = 4e-4):
     if arch.startswith("BiT"):
         base_model = BIT_MODELS[arch](head_size=-1)
         if not from_scratch:
@@ -96,13 +109,14 @@ def main(arch: str, image_folder: str, from_scratch: bool = False, num_gpus: int
         net_final_size = base_model.width_factor * 2048
     else:
         raise ValueError(f"arch '{arch}'' not supported")
-    ds = ImagesDataset(image_folder, IMAGE_SIZE)
-    # train_loader = DataLoader(
-    #     ds, batch_size=BATCH_SIZE, num_workers=NUM_WORKERS, shuffle=True)
+    train_ds, valid_ds = get_datasets(image_folder, val_ratio=0.05)
 
     model = SelfSupervisedLearner(
         base_model,
-        ds,
+        train_ds,
+        valid_ds,
+        epochs,
+        lr,
         augment_fn=torch.nn.Sequential(
             T.RandomResizedCrop((IMAGE_SIZE, IMAGE_SIZE)),
             RandomApply(
@@ -111,13 +125,14 @@ def main(arch: str, image_folder: str, from_scratch: bool = False, num_gpus: int
             ),
             T.RandomGrayscale(p=0.2),
             T.RandomHorizontalFlip(),
-            # RandomApply(
-            #     T.GaussianBlur((3, 3), (1.0, 2.0)),
-            #     p=0.2
-            # ),
+            RandomApply(
+                T.GaussianBlur((3, 3), (1.0, 2.0)),
+                p=0.2
+            ),
             T.Normalize(
                 mean=torch.tensor([0.485, 0.456, 0.406]),
-                std=torch.tensor([0.229, 0.224, 0.225])),
+                std=torch.tensor([0.229, 0.224, 0.225])
+            )
         ),
         batch_size=4,
         image_size=IMAGE_SIZE,
@@ -131,8 +146,16 @@ def main(arch: str, image_folder: str, from_scratch: bool = False, num_gpus: int
     trainer = pl.Trainer(
         amp_level='O2', precision=16,
         gpus=num_gpus,
+        val_check_interval=1000,
         max_epochs=epochs,
-        accumulate_grad_batches=1,
+        callbacks=[
+            LearningRateMonitor(logging_interval='step'),
+            ModelCheckpoint(
+                monitor='val_loss',
+                filename='byol-{step:06d}-{val_loss:.2f}',
+                save_top_k=2)
+        ],
+        accumulate_grad_batches=2,
         auto_scale_batch_size='power'
     )
 
