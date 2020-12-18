@@ -6,9 +6,7 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 
-# from torchvision import transforms as T
-from kornia import augmentation as augs
-from kornia import filters, enhance
+from torchvision import transforms as T
 
 
 # helper functions
@@ -148,15 +146,21 @@ class BYOL(nn.Module):
         super().__init__()
 
         # default SimCLR augmentation
-
-        DEFAULT_AUG = nn.Sequential(
-            RandomApply(augs.ColorJitter(0.8, 0.8, 0.8, 0.2), p=0.8),
-            augs.RandomGrayscale(p=0.2),
-            augs.RandomHorizontalFlip(),
-            RandomApply(filters.GaussianBlur2d((3, 3), (1.5, 1.5)), p=0.1),
-            augs.RandomResizedCrop((image_size, image_size)),
-            enhance.Normalize(mean=torch.tensor(
-                [0.485, 0.456, 0.406]), std=torch.tensor([0.229, 0.224, 0.225])
+        DEFAULT_AUG = torch.nn.Sequential(
+            RandomApply(
+                T.ColorJitter(0.8, 0.8, 0.8, 0.2),
+                p=0.3
+            ),
+            T.RandomGrayscale(p=0.2),
+            T.RandomHorizontalFlip(),
+            RandomApply(
+                T.GaussianBlur((3, 3), (1.0, 2.0)),
+                p=0.2
+            ),
+            T.RandomResizedCrop((image_size, image_size)),
+            T.Normalize(
+                mean=torch.tensor([0.485, 0.456, 0.406]),
+                std=torch.tensor([0.229, 0.224, 0.225])
             )
         )
 
@@ -215,8 +219,8 @@ class BYOL(nn.Module):
             target_proj_one.detach_()
             target_proj_two.detach_()
 
-        loss_one = loss_fn(online_pred_one, target_proj_two)
-        loss_two = loss_fn(online_pred_two, target_proj_one)
+        loss_one = loss_fn(online_pred_one, target_proj_two.detach())
+        loss_two = loss_fn(online_pred_two, target_proj_one.detach())
 
         loss = loss_one + loss_two
         return loss.mean()
