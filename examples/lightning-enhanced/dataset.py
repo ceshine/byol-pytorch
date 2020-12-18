@@ -29,7 +29,7 @@ def collect_images(parse_path, val_ratio: float = 0.2):
         entries.append(Path(item).resolve())
     df = pd.DataFrame({"path": entries})
 
-    ss = ShuffleSplit(n_splits=1, test_size=val_ratio)
+    ss = ShuffleSplit(n_splits=1, test_size=val_ratio, random_state=42)
     train_idx, valid_idx = next(iter(ss.split(df)))
     return {
         "train": df.iloc[train_idx],
