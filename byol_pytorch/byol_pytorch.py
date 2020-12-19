@@ -156,7 +156,6 @@ class BYOL(nn.Module):
             net, net_final_size, projection_size, projection_hidden_size
         )
         self.use_momentum = use_momentum
-        self.target_encoder = None
         self.target_ema_updater = EMA(moving_average_decay)
 
         self.online_predictor = MLP(
