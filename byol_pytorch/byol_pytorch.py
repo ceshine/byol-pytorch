@@ -18,25 +18,10 @@ def flatten(t):
     return t.reshape(t.shape[0], -1)
 
 
-def singleton(cache_key):
-    def inner_fn(fn):
-        @wraps(fn)
-        def wrapper(self, *args, **kwargs):
-            instance = getattr(self, cache_key)
-            if instance is not None:
-                return instance
-
-            instance = fn(self, *args, **kwargs)
-            setattr(self, cache_key, instance)
-            return instance
-        return wrapper
-    return inner_fn
-
-
 def loss_fn(x, y):
     x = F.normalize(x, dim=-1, p=2)
     y = F.normalize(y, dim=-1, p=2)
-    return 2 - 2 * (x * y).sum(dim=-1)
+    return -(x * y).sum(dim=-1)
 
 
 class RandomApply(nn.Module):
@@ -177,17 +162,11 @@ class BYOL(nn.Module):
         self.online_predictor = MLP(
             projection_size, projection_size, projection_hidden_size)
 
-        # send a mock image tensor to instantiate singleton parameters
-        self.forward(torch.randn(
-            2, 3, image_size,
-            image_size
-        ))  # .type_as(next(self.online_predictor.parameters())))
-
-    @ singleton('target_encoder')
-    def _get_target_encoder(self):
-        target_encoder = copy.deepcopy(self.online_encoder)
-        set_trainable(target_encoder, False)
-        return target_encoder
+        if self.use_momentum:
+            self.target_encoder = self.online_encoder
+        else:
+            self.target_encoder = copy.deepcopy(self.online_encoder)
+        set_trainable(self.target_encoder, False)
 
     def reset_moving_average(self):
         del self.target_encoder
@@ -212,15 +191,11 @@ class BYOL(nn.Module):
         online_pred_two = self.online_predictor(online_proj_two)
 
         with torch.no_grad():
-            target_encoder = self._get_target_encoder(
-            ) if self.use_momentum else self.online_encoder
-            target_proj_one, _ = target_encoder(image_one)
-            target_proj_two, _ = target_encoder(image_two)
-            target_proj_one.detach_()
-            target_proj_two.detach_()
+            target_proj_one, _ = self.target_encoder(image_one)
+            target_proj_two, _ = self.target_encoder(image_two)
 
         loss_one = loss_fn(online_pred_one, target_proj_two.detach())
         loss_two = loss_fn(online_pred_two, target_proj_one.detach())
 
         loss = loss_one + loss_two
-        return loss.mean()
+        return loss.mean() / 2
