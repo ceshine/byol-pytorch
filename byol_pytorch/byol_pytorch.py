@@ -164,9 +164,9 @@ class BYOL(nn.Module):
 
         if self.use_momentum:
             self.target_encoder = copy.deepcopy(self.online_encoder)
+            set_trainable(self.target_encoder, False)
         else:
             self.target_encoder = self.online_encoder
-        set_trainable(self.target_encoder, False)
 
     def reset_moving_average(self):
         del self.target_encoder
