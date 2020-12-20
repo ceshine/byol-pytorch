@@ -110,15 +110,7 @@ class SelfSupervisedLearner(pl.LightningModule):
             {
                 "params": chain.from_iterable([x.parameters() for x in layer_groups[1]]),
                 "lr": self.learning_rate
-            },
-            # {
-            #     "params": self.learner.online_predictor.parameters(),
-            #     "lr": self.learning_rate
-            # },
-            # {
-            #     "params": self.learner.online_encoder.projector.parameters(),
-            #     "lr": self.learning_rate
-            # }
+            }
         ])
         scheduler = {
             'scheduler': MultiStageScheduler(
@@ -133,7 +125,6 @@ class SelfSupervisedLearner(pl.LightningModule):
             'frequency': 1,
             'strict': True,
         }
-        # return [optimizer], [scheduler]
         print(optimizer)
         return {
             'optimizer': optimizer,
@@ -151,6 +142,7 @@ def main(
         from_model: Optional[str] = None,
         grad_accu: int = 1,
         num_gpus: int = 1, epochs: int = 100, lr: float = 4e-4):
+    pl.seed_everything(int(os.environ.get("SEED", 738)))
     if arch.startswith("BiT"):
         base_model = BIT_MODELS[arch](head_size=-1)
         if not from_scratch and not from_model:
@@ -167,33 +159,18 @@ def main(
         valid_ds,
         epochs,
         lr,
-        # augment_fn=torch.nn.Sequential(
-        #     T.RandomResizedCrop((IMAGE_SIZE, IMAGE_SIZE)),
-        #     RandomApply(
-        #         T.ColorJitter(0.8, 0.8, 0.8, 0.2),
-        #         p=0.3
-        #     ),
-        #     T.RandomGrayscale(p=0.2),
-        #     T.RandomHorizontalFlip(),
-        #     RandomApply(
-        #         T.GaussianBlur((3, 3), (1.0, 2.0)),
-        #         p=0.2
-        #     ),
-        #     T.Normalize(
-        #         mean=torch.tensor([0.485, 0.456, 0.406]),
-        #         std=torch.tensor([0.229, 0.224, 0.225])
-        #     )
-        # ),
         num_gpus=num_gpus,
         batch_size=batch_size if batch_size else 4,
         image_size=IMAGE_SIZE,
         projection_size=256,
         projection_hidden_size=4096,
         net_final_size=net_final_size,
-        moving_average_decay=0.99
+        moving_average_decay=0.995,
+        use_momentum=True
     )
 
     if from_model:
+        print("loading weights...")
         # Load pretrained-weights
         weights = torch.load(from_model)
         model.learner.online_encoder.projector.load_state_dict(
@@ -203,19 +180,21 @@ def main(
         model.learner.online_predictor.load_state_dict(
             weights["online_predictor"])
         model.learner.target_encoder.net.load_state_dict(
-            weights["online_encoder_net"])
+            weights["target_encoder_net"])
+        model.learner.target_encoder.projector.load_state_dict(
+            weights["target_encoder_proj"])
         del weights
 
     trainer = pl.Trainer(
         accelerator='ddp' if num_gpus > 1 else None,
-        amp_backend="apex", amp_level='O1',
+        amp_backend="apex", amp_level='O2',
         precision=16,
         gpus=num_gpus,
         val_check_interval=0.5,
         gradient_clip_val=10,
         max_epochs=epochs,
         callbacks=[
-            # LearningRateMonitor(logging_interval='step'),
+            LearningRateMonitor(logging_interval='step'),
             ModelCheckpoint(
                 monitor='val_loss',
                 filename='byol-{step:06d}-{val_loss:.4f}',
@@ -267,16 +246,23 @@ def main(
     # trainer = pl.Trainer(
     #     resume_from_checkpoint="lightning_logs/version_20/checkpoints/byol-step=001135-val_loss=0.03.ckpt")
 
-    torch.save({
-        "online_encoder_proj": model.learner.online_encoder.projector.state_dict(),
-        "online_encoder_net": model.learner.online_encoder.net.state_dict(),
-        "online_predictor": model.learner.online_predictor.state_dict(),
-        "target_encoder_net": model.learner.target_encoder.net.state_dict(),
-        "target_encoder_proj": model.learner.target_encoder.projector.state_dict(),
-        "config": {
-            "arch": arch
-        }
-    }, f"cache/byol_{arch}.pth")
+    if num_gpus == 1 or torch.distributed.get_rank() == 0:
+        torch.save({
+            "online_encoder_proj":
+            model.learner.online_encoder.projector.state_dict(),
+            "online_encoder_net":
+            model.learner.online_encoder.net.state_dict(),
+            "online_predictor":
+            model.learner.online_predictor.state_dict(),
+            "target_encoder_net":
+            model.learner.target_encoder.net.state_dict(),
+            "target_encoder_proj":
+            model.learner.target_encoder.projector.state_dict(),
+            "config": {
+                "arch": arch
+            }
+        }, f"cache/byol_{arch}.pth")
+        print("Model saved")
 
 
 if __name__ == '__main__':

@@ -1,4 +1,4 @@
-import math
+import os
 from typing import Optional
 from itertools import chain
 
@@ -37,6 +37,7 @@ def main(
         from_model: Optional[str] = None,
         grad_accu: int = 1, steps: Optional[int] = None,
         num_gpus: int = 1, epochs: int = 1, lr: float = 4e-4):
+    pl.seed_everything(int(os.environ.get("SEED", 738)))
     if arch.startswith("BiT"):
         base_model = BIT_MODELS[arch](head_size=-1)
         print("Loading pretrained model...")
@@ -65,8 +66,8 @@ def main(
     if steps:
         trainer = pl.Trainer(
             accelerator='ddp' if num_gpus > 1 else None,
-            # amp_backend="apex", amp_level='O2',
-            # precision=16,
+            amp_backend="apex", amp_level='O2',
+            precision=16,
             gpus=num_gpus,
             val_check_interval=0.5,
             gradient_clip_val=10,
@@ -77,8 +78,8 @@ def main(
     else:
         trainer = pl.Trainer(
             accelerator='ddp' if num_gpus > 1 else None,
-            # amp_backend="apex", amp_level='O2',
-            # precision=16,
+            amp_backend="apex", amp_level='O2',
+            precision=16,
             gpus=num_gpus,
             val_check_interval=0.5,
             gradient_clip_val=10,
