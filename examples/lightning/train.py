@@ -19,22 +19,23 @@ resnet = models.resnet50(pretrained=True)
 
 parser = argparse.ArgumentParser(description='byol-lightning-test')
 
-parser.add_argument('--image_folder', type=str, required = True,
-                       help='path to your folder of images for self-supervised learning')
+parser.add_argument('--image_folder', type=str, required=True,
+                    help='path to your folder of images for self-supervised learning')
 
 args = parser.parse_args()
 
 # constants
 
 BATCH_SIZE = 32
-EPOCHS     = 1000
-LR         = 3e-4
-NUM_GPUS   = 2
+EPOCHS = 1000
+LR = 3e-4
+NUM_GPUS = 2
 IMAGE_SIZE = 256
 IMAGE_EXTS = ['.jpg', '.png', '.jpeg']
 NUM_WORKERS = multiprocessing.cpu_count()
 
 # pytorch lightning module
+
 
 class SelfSupervisedLearner(pl.LightningModule):
     def __init__(self, net, **kwargs):
@@ -57,8 +58,10 @@ class SelfSupervisedLearner(pl.LightningModule):
 
 # images dataset
 
+
 def expand_greyscale(t):
     return t.expand(3, -1, -1)
+
 
 class ImagesDataset(Dataset):
     def __init__(self, folder, image_size):
@@ -91,23 +94,25 @@ class ImagesDataset(Dataset):
 
 # main
 
+
 if __name__ == '__main__':
     ds = ImagesDataset(args.image_folder, IMAGE_SIZE)
-    train_loader = DataLoader(ds, batch_size=BATCH_SIZE, num_workers=NUM_WORKERS, shuffle=True)
-
+    train_loader = DataLoader(
+        ds, batch_size=BATCH_SIZE, num_workers=NUM_WORKERS, shuffle=True)
+    print(resnet)
     model = SelfSupervisedLearner(
         resnet,
-        image_size = IMAGE_SIZE,
-        hidden_layer = 'avgpool',
-        projection_size = 256,
-        projection_hidden_size = 4096,
-        moving_average_decay = 0.99
+        image_size=IMAGE_SIZE,
+        projection_size=256,
+        projection_hidden_size=4096,
+        moving_average_decay=0.99
     )
 
     trainer = pl.Trainer(
-        gpus = NUM_GPUS,
-        max_epochs = EPOCHS,
-        accumulate_grad_batches = 1
+        gpus=NUM_GPUS,
+        precision=16,
+        max_epochs=EPOCHS,
+        accumulate_grad_batches=1
     )
 
     trainer.fit(model, train_loader)

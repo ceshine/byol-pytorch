@@ -60,15 +60,26 @@ def update_moving_average(ema_updater, ma_model, current_model):
 class MLP(nn.Module):
     "MLP class for projector and predictor"
 
-    def __init__(self, dim, projection_size, hidden_size=4096):
+    def __init__(self, dim, projection_size, hidden_size=4096, batch_norm: bool = True):
         super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(dim, hidden_size),
-            # nn.BatchNorm1d(hidden_size),
-            nn.LayerNorm(hidden_size),
-            nn.ReLU(inplace=True),
-            nn.Linear(hidden_size, projection_size)
-        )
+        if batch_norm:
+            self.net = nn.Sequential(
+                nn.Linear(dim, hidden_size),
+                nn.BatchNorm1d(hidden_size, affine=False),
+                nn.ReLU(inplace=True),
+                nn.Linear(hidden_size, hidden_size),
+                nn.BatchNorm1d(hidden_size, affine=False),
+                nn.ReLU(inplace=True),
+                nn.Linear(hidden_size, projection_size),
+                nn.BatchNorm1d(hidden_size, affine=False)
+            )
+        else:
+            self.net = nn.Sequential(
+                nn.Linear(dim, hidden_size),
+                nn.BatchNorm1d(hidden_size, affine=False),
+                nn.ReLU(inplace=True),
+                nn.Linear(hidden_size, projection_size)
+            )
 
     def forward(self, x):
         return self.net(x)
@@ -160,7 +171,9 @@ class BYOL(nn.Module):
         self.target_ema_updater = EMA(moving_average_decay)
 
         self.online_predictor = MLP(
-            projection_size, projection_size, projection_hidden_size)
+            projection_size, projection_size, projection_hidden_size // 4,
+            batch_norm=False
+        )
 
         if self.use_momentum:
             self.target_encoder = copy.deepcopy(self.online_encoder)
@@ -178,9 +191,9 @@ class BYOL(nn.Module):
         update_moving_average(self.target_ema_updater,
                               self.target_encoder, self.online_encoder)
 
-    def forward(self, x, return_embedding=False):
-        if return_embedding:
-            return self.online_encoder(x)
+    def forward(self, x, return_embeddings=False):
+        # if return_embedding:
+        #     return self.online_encoder(x)
 
         image_one, image_two = self.augment1(x), self.augment2(x)
 
@@ -190,12 +203,22 @@ class BYOL(nn.Module):
         online_pred_one = self.online_predictor(online_proj_one)
         online_pred_two = self.online_predictor(online_proj_two)
 
-        with torch.no_grad():
-            target_proj_one, _ = self.target_encoder(image_one)
-            target_proj_two, _ = self.target_encoder(image_two)
+        if self.use_momentum:
+            with torch.no_grad():
+                target_proj_one, _ = self.target_encoder(image_one)
+                target_proj_two, _ = self.target_encoder(image_two)
+        else:
+            target_proj_one = online_proj_one
+            target_proj_two = online_proj_two
 
         loss_one = loss_fn(online_pred_one, target_proj_two.detach())
         loss_two = loss_fn(online_pred_two, target_proj_one.detach())
 
         loss = loss_one + loss_two
-        return loss.mean() / 2
+        if return_embeddings:
+            return loss.mean() / 2, torch.stack([
+                online_pred_one, online_pred_two,
+                target_proj_one, target_proj_two
+            ], dim=1).detach()
+        else:
+            return loss.mean() / 2
